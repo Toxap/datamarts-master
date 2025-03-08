@@ -1,0 +1,47 @@
+variables:
+  SBT_OPTS: "-Dhttp.proxyHost=${PROXY_HOST} -Dhttp.proxyPort=${PROXY_PORT} -Dhttps.proxyHost=${PROXY_HOST} -Dhttps.proxyPort=${PROXY_PORT}"
+
+stages:
+  - build
+  - deploy
+
+sbt-build:
+  image: nexus-repo.dmp.vimpelcom.ru/gitlab-runners/maven-deploy:release-2.0.4
+  stage: build
+  script:
+    - sbt assembly
+  artifacts:
+    paths:
+      - target/*/*.jar
+    expire_in: 1 week
+  cache:
+    paths:
+      - ~/.ivy2/
+  only:
+    refs:
+      - master
+
+put-to-hdfs:
+  image: nexus-repo.dmp.vimpelcom.ru/gitlab-runners/hdpclient-vault:hpd31-vault160
+  dependencies:
+    - sbt-build
+  stage: deploy
+  script:
+    - if [[ -z "${VAULT_TOKEN}" ]]; then echo "Missing enviroment varible VAULT_TOKEN in gitlab group or current branch/tag not protected";exit 1;fi
+    - export USERNAME="$(vault kv get -field=username $VAULT_PATH_AIRFLOW_TECH_USER)"
+    - export PASSWORD="$(vault kv get -field=password $VAULT_PATH_AIRFLOW_TECH_USER)"
+    - echo $PASSWORD | kinit $USERNAME
+    - hdfs dfs -mkdir -p /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/all
+    - hdfs dfs -put -f target/*/*.jar /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/all/
+    - hdfs dfs -ls /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/all
+    - hdfs dfs -mkdir -p /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/latest
+    - hdfs dfs -rm -r -f -skipTrash /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/latest/*
+    - hdfs dfs -put target/*/*.jar /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/latest/
+    - hdfs dfs -mv /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/latest/DataMarts-assembly-*.jar /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/latest/DataMarts-assembly.jar
+    - hdfs dfs -ls /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/version/latest/
+    - hdfs dfs -mkdir -p /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/sources
+    - hdfs dfs -put -f src/main/resources/sources/bma_aat_dim_ucn_new_202407081510.csv /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/sources/
+    - hdfs dfs -put -f src/main/scala/ru/beeline/cvm/datamarts/transform/comfortTime/testctn.csv /apps/airflow/$HDFS_TARGET_USER/$CI_PROJECT_NAME/sources/
+  only:
+    refs:
+      - master
